@@ -11,6 +11,7 @@
 #include "globals.h"
 #include "CruiseControl.h"
 #include "Helper.h"
+#include "MadCyphal.h"
 #include "StringPrinter.h"
 #include "OtaUpdater.h"
 
@@ -28,7 +29,6 @@ int initialPotLvl = -1;
 int pwmSignal = 0;
 
 // ESC
-Servo escPwm, escRpm;
 CircularBuffer<float, 50> voltageBuffer;
 MCP_CAN CAN(ESC_CAN_RX_PIN);
 EscData escData = EscData();
@@ -91,22 +91,17 @@ void setup()
     }
     Serial.println("CAN BUS OK!");
 
-    pinMode(ESC_RPM_PIN, INPUT);
-    escRpm.attach(ESC_RPM_PIN);
-    escPwm.attach(ESC_PWM_PIN);
-
     trackPowerThread.onRun(handlePowerTracking);
     trackPowerThread.setInterval(250);
 
     telemetryThread.onRun(handleTelemetry);
-    telemetryThread.setInterval(50);
+    telemetryThread.setInterval(1);
 
     // setup BLE
     if (!BLE.begin())
     {
         bleSerial.println("Starting Bluetooth@ Low Energy module failed!");
-        while (1)
-            ;
+        while (1);
     }
     BLE.setLocalName("SP-140");
     BLE.setAdvertisedService(bleService);
@@ -188,15 +183,7 @@ void handleThrottle()
     }
     potBuffer.push(potRaw);
 
-    if (millis() - startTime < 2000)
-        return;
-
-    Serial.print("Rpm ");
-    Serial.print(analogRead(ESC_RPM_PIN));
-    Serial.print(" , ");
-    Serial.print(escRpm.read());
-    Serial.print(" , ");
-    Serial.println(escRpm.readMicroseconds());
+    if (millis() - startTime < 2000) return;
 
     if (prevPotLvl != potLvl)
     {
@@ -247,16 +234,16 @@ void handleThrottle()
             }
             if (cruiseControl.isInitialized())
             {
-                escPwm.writeMicroseconds(cruiseControl.calculateCruisePwm());
+                writePwm(cruiseControl.calculateCruisePwm());
             }
             else
             {
-                escPwm.writeMicroseconds(pwmSignal);
+                writePwm(pwmSignal);
             }
         }
         else
         {
-            escPwm.writeMicroseconds(ESC_MIN_PWM);
+            writePwm(ESC_MIN_PWM);
         }
     }
     else
@@ -268,7 +255,7 @@ void handleThrottle()
             initialPotLvl = -1;
             cruiseControl.disable();
         }
-        escPwm.writeMicroseconds(ESC_DISARMED_PWM);
+        writePwm(ESC_DISARMED_PWM);
     }
 }
 
@@ -302,23 +289,12 @@ void handleTelemetry()
 
     voltageBuffer.push(escData.busVoltage);
     escData.wattage = escData.busCurrent * escData.busVoltage;
-    escData.rpm = analogRead(ESC_RPM_PIN); //escRpm.read(); // * 60 / MOTOR_POLE_MAGNETS;
-
-    Serial.print("Elec speed ");
-    Serial.print(escData.electricalSpeed);
-    Serial.print(", outputThrottle ");
-    Serial.print(escData.outputThrottle);
-    Serial.print(", pwm ");
-    Serial.println(pwmSignal);
 
     switch (subjectId)
     {
     case CURRENT_INFO_CAN_ID:
-        Serial.println("Current Frame ");
         return decodeBufferCurrentInfo(buf, escData.electricalSpeed, escData.busCurrent, escData.operatingStatus);
     case VOLTAGE_INFO_CAN_ID:
-        Serial.print("Voltage ");
-        Serial.println(escData.busVoltage);
         int capacitanceTemp, motorTemp;
         return decodeBufferVoltageInfo(buf, escData.outputThrottle, escData.busVoltage, escData.mosTemp, capacitanceTemp, motorTemp);
     }
@@ -376,7 +352,7 @@ void handleBleData()
     bleData.volts = smoothedBatteryVoltage();
     bleData.batteryPercentage = batteryPercentage(bleData.volts);
     bleData.amps = escData.busCurrent;
-    bleData.temperatureC = escData.electricalSpeed; //TODO: Felix - change to temp
+    bleData.temperatureC = escData.electricalSpeed / MOTOR_POLE_MAGNETS; //TODO: Felix - change to temp
     bleData.rpm = escData.rpm;
     bleData.kW = constrain(escData.wattage / 1000.0, 0, 50);
     bleData.usedKwh = wattsHoursUsed / 1000; 
@@ -399,6 +375,14 @@ void handleBleData()
 }
 
 /// region Helper functions
+
+void writePwm(int pwm) {
+  auto frameId = encodeCyphalFrameId(CAN_PRIO_HIGH, BROADCAST_NODE_ID, SEND_PWM_CAN_ID);
+  uint16_t throttleValue[4] = {pwm};
+  uint8_t encodedThrottle[8] = {0};
+  encodeThrottleValues(throttleValue, encodedThrottle);
+  CAN.sendMsgBuf(frameId, 1, 8, encodedThrottle);
+}
 
 // throttle easing function based on threshold/performance mode
 int limitedThrottle(int current, int last, int threshold)
