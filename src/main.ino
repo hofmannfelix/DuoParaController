@@ -14,6 +14,7 @@
 #include "MadCyphal.h"
 #include "StringPrinter.h"
 #include "OtaUpdater.h"
+#include "EscData.h"
 
 // Power Switch
 ezButton powerSwitch(BUTTON_PIN);
@@ -31,8 +32,8 @@ int pwmSignal = 0;
 // ESC
 CircularBuffer<float, 50> voltageBuffer;
 MCP_CAN CAN(ESC_CAN_RX_PIN);
-EscData escData = EscData();
-float wattsHoursUsed = 0;
+EscData leftEscData;
+EscData rightEscData;
 
 // Bluetooth Low Energy Service
 auto bleConnectedTime = millis();
@@ -69,7 +70,6 @@ void setup()
 {
     Serial.begin(115200);
     Watchdog.enable(4000);
-    while (!Serial);
 
     // setup power switch button
     powerSwitch.setDebounceTime(50);
@@ -79,12 +79,12 @@ void setup()
 
     // setup Throttle
     analogReadResolution(12);
-    pot.setAnalogResolution(4096);
+    pot.setAnalogResolution(ANALOG_READ_MAX);
     throttleThread.onRun(handleThrottle);
     throttleThread.setInterval(22);
 
     // setup ESC
-    while (CAN_OK != CAN.begin(CAN_500KBPS)) // init can bus : baudrate = 500k
+    while (CAN_OK != CAN.begin(CAN_500KBPS))
     {
         Serial.println("CAN BUS FAIL!");
         delay(100);
@@ -185,18 +185,20 @@ void handleThrottle()
 
     if (millis() - startTime < 2000) return;
 
-    if (prevPotLvl != potLvl)
+    static auto lastUpdate = millis();
+    if (prevPotLvl != potLvl && millis() - lastUpdate > 1000)
     {
-        // bleSerial.print("pwmSignal: ");
-        // bleSerial.print(pwmSignal);
-        // bleSerial.print(" min max: ");
-        // bleSerial.print(initialPotLvl);
-        // bleSerial.print(" ");
-        // bleSerial.print(initialPotLvl + POT_READ_MAX);
-        // bleSerial.print(" potLvl: ");
-        // bleSerial.print(potLvl);
-        // bleSerial.print(" rawPotLvl: ");
-        // bleSerial.println(potRaw);
+        lastUpdate = millis();
+        bleSerial.print("pwmSignal: ");
+        bleSerial.print(pwmSignal);
+        bleSerial.print(" min max: ");
+        bleSerial.print(initialPotLvl);
+        bleSerial.print(" ");
+        bleSerial.print(initialPotLvl + POT_READ_MAX);
+        bleSerial.print(" potLvl: ");
+        bleSerial.print(potLvl);
+        bleSerial.print(" rawPotLvl: ");
+        bleSerial.println(potRaw);
     }
 
     // set initial potentiometer Lvl once value changes are less than INITIALIZED_THRESHOLD
@@ -215,8 +217,10 @@ void handleThrottle()
         // calculate pwm signal relative to the initial potentiometer Lvl
         pwmSignal = mapd(potLvl - POT_MIN_OFFSET, initialPotLvl, initialPotLvl + POT_READ_MAX, ESC_MIN_PWM, ESC_MAX_PWM);
         bool isPotWithinBounds = constrain(potLvl, initialPotLvl - POT_OUT_OF_BOUNDS_VALUE, initialPotLvl + POT_READ_MAX + POT_OUT_OF_BOUNDS_VALUE) == potLvl;
+        bool isRpmChangeToLarge = leftEscData.isRpmChangeToLarge(rightEscData);
+        bool isRpmUpdateExceeded = leftEscData.isLastRpmUpdateExceeded() || rightEscData.isLastRpmUpdateExceeded();
 
-        if (isPotWithinBounds)
+        if (isPotWithinBounds && !isRpmChangeToLarge && !isRpmUpdateExceeded)
         {
             static auto cruiseInitializedTimestamp = millis();
             if (cruiseControl.isEnabled() && !cruiseControl.isInitialized())
@@ -243,6 +247,8 @@ void handleThrottle()
         }
         else
         {
+            if (isRpmChangeToLarge) bleSerial.println("RPM change exceeded limit");
+            if (isRpmUpdateExceeded) bleSerial.println("RPM update exceeded limit");
             writePwm(ESC_MIN_PWM);
         }
     }
@@ -268,7 +274,8 @@ void handlePowerTracking()
 
     if (isArmed)
     {
-        wattsHoursUsed += round(escData.wattage / 60 / 60 * msec_diff) / 1000.0;
+        leftEscData.wattsHoursUsed += round(leftEscData.wattage / 60 / 60 * msec_diff) / 1000.0;
+        rightEscData.wattsHoursUsed += round(rightEscData.wattage / 60 / 60 * msec_diff) / 1000.0;
     }
 }
 
@@ -287,16 +294,22 @@ void handleTelemetry()
     uint16_t subjectId;
     decodeCyphalFrameId(canId, nodeId, subjectId);
 
+    auto &escData = canId == ESC_LEFT_CAN_ID ? leftEscData : rightEscData;
+
     voltageBuffer.push(escData.busVoltage);
     escData.wattage = escData.busCurrent * escData.busVoltage;
 
     switch (subjectId)
     {
     case CURRENT_INFO_CAN_ID:
-        return decodeBufferCurrentInfo(buf, escData.electricalSpeed, escData.busCurrent, escData.operatingStatus);
+        decodeBufferCurrentInfo(buf, escData.electricalSpeed, escData.busCurrent, escData.operatingStatus);
+        escData.escRpmBuffer.push(escData.electricalSpeed);
+        escData.lastRpmUpdate = millis();
+        break;
     case VOLTAGE_INFO_CAN_ID:
         int capacitanceTemp, motorTemp;
-        return decodeBufferVoltageInfo(buf, escData.outputThrottle, escData.busVoltage, escData.mosTemp, capacitanceTemp, motorTemp);
+        decodeBufferVoltageInfo(buf, escData.outputThrottle, escData.busVoltage, escData.mosTemp, capacitanceTemp, motorTemp);
+        break;
     }
 }
 
@@ -349,13 +362,14 @@ void handleBleData()
         return;
     }
 
+    auto &escData = leftEscData; //TODO: Felix send right esc data as well
     bleData.volts = smoothedBatteryVoltage();
     bleData.batteryPercentage = batteryPercentage(bleData.volts);
     bleData.amps = escData.busCurrent;
-    bleData.temperatureC = escData.electricalSpeed / MOTOR_POLE_MAGNETS; //TODO: Felix - change to temp
+    bleData.temperatureC = escData.mosTemp;
     bleData.rpm = escData.rpm;
     bleData.kW = constrain(escData.wattage / 1000.0, 0, 50);
-    bleData.usedKwh = wattsHoursUsed / 1000; 
+    bleData.usedKwh = escData.wattsHoursUsed / 1000; 
     bleData.power = mapd(max(pwmSignal, cruiseControl.calculateCruisePwm()), ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
 
     // write values
@@ -378,7 +392,7 @@ void handleBleData()
 
 void writePwm(int pwm) {
   auto frameId = encodeCyphalFrameId(CAN_PRIO_HIGH, BROADCAST_NODE_ID, SEND_PWM_CAN_ID);
-  uint16_t throttleValue[4] = {pwm};
+  uint16_t throttleValue[] = {static_cast<uint16_t>(pwm), static_cast<uint16_t>(pwm), static_cast<uint16_t>(pwm), static_cast<uint16_t>(pwm)};
   uint8_t encodedThrottle[8] = {0};
   encodeThrottleValues(throttleValue, encodedThrottle);
   CAN.sendMsgBuf(frameId, 1, 8, encodedThrottle);

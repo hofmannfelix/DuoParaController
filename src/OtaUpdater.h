@@ -3,8 +3,6 @@
 
 #include <string>
 
-
-
 class OtaUpdater {
     const std::string ssid = "Felix iPhone";
     const std::string password = "1wskwrp0flxv";

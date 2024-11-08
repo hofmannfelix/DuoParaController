@@ -11,6 +11,9 @@
 #define BUTTON_PIN D4
 #define ESC_CAN_RX_PIN D7
 
+#define ESC_LEFT_CAN_ID 16
+#define ESC_RIGHT_CAN_ID 17
+
 #define MOTOR_POLE_MAGNETS 15
 
 #define CURRENT_INFO_CAN_ID 6160
@@ -19,7 +22,7 @@
 #define ESC_DISARMED_PWM 0
 #define ESC_MIN_PWM 0  // ESC min is 0 via CAN
 #define ESC_MAX_PWM 2000  // ESC max 2000 via CAN
-#define ANALOG_READ_MAX 4090
+#define ANALOG_READ_MAX 4096
 #define POT_READ_MAX 1400
 #define POT_MIN_OFFSET 0  // Pot value delta to actually accelerate to make it less touchy
 #define POT_OUT_OF_BOUNDS_VALUE 200 // Stop throttle if values are out of throttle limits (for safety)
@@ -40,18 +43,4 @@ class BleData {
   float usedKwh;
   float batteryPercentage;
   float power;
-};
-
-class EscData {
-  public:
-  float busVoltage;
-  int busCurrent;
-  int mosTemp;
-  int capacitanceTemp;
-  int motorTemp;
-  int outputThrottle;
-  int electricalSpeed;
-  int wattage;
-  int rpm;
-  uint16_t operatingStatus;
 };
