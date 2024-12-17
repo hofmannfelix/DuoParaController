@@ -19,9 +19,12 @@
 #define CURRENT_INFO_CAN_ID 6160
 #define VOLTAGE_INFO_CAN_ID 6161
 
+#define MOTOR_POLE_PAIRS 15
+#define BATTERY_CELLS 12
+#define CUTOFF_BATTERY_PERCENTAGE 8
 #define ESC_DISARMED_PWM 0
 #define ESC_MIN_PWM 0  // ESC min is 0 via CAN
-#define ESC_MAX_PWM 2000  // ESC max 2000 via CAN
+#define ESC_MAX_PWM 2048  // ESC max 2048 via CAN
 #define ANALOG_READ_MAX 4096
 #define POT_READ_MAX 1400
 #define POT_MIN_OFFSET 0  // Pot value delta to actually accelerate to make it less touchy

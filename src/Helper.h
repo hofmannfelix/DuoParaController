@@ -7,4 +7,6 @@ double closestDivisibleBy(double value, int num);
 
 float batteryPercentage(float voltage);
 
+bool isCutoffPercentageReached(float voltage);
+
 #endif

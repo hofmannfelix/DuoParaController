@@ -199,6 +199,21 @@ void handleThrottle()
         bleSerial.print(potLvl);
         bleSerial.print(" rawPotLvl: ");
         bleSerial.println(potRaw);
+
+        bleSerial.print("throttle: ");
+        bleSerial.println(leftEscData.outputThrottle);
+
+        static auto maxLastRpmUpdate = 0;
+        if (millis() - leftEscData.lastRpmUpdate > maxLastRpmUpdate) {
+            bleSerial.print("Max last update l: ");
+            bleSerial.println(millis() - leftEscData.lastRpmUpdate);
+            maxLastRpmUpdate = millis() - leftEscData.lastRpmUpdate;
+        }
+        if (millis() - rightEscData.lastRpmUpdate > maxLastRpmUpdate) {
+            bleSerial.print("Max last update r: ");
+            bleSerial.println(millis() - rightEscData.lastRpmUpdate);
+            maxLastRpmUpdate = millis() - rightEscData.lastRpmUpdate;
+        }
     }
 
     // set initial potentiometer Lvl once value changes are less than INITIALIZED_THRESHOLD
@@ -212,7 +227,7 @@ void handleThrottle()
         bleSerial.println(potLvl);
     }
 
-    if (isArmed && isInitialized)
+    if (isArmed && isInitialized && !isCutoffPercentageReached(bleData.volts))
     {
         // calculate pwm signal relative to the initial potentiometer Lvl
         pwmSignal = mapd(potLvl - POT_MIN_OFFSET, initialPotLvl, initialPotLvl + POT_READ_MAX, ESC_MIN_PWM, ESC_MAX_PWM);
@@ -220,7 +235,7 @@ void handleThrottle()
         bool isRpmChangeToLarge = leftEscData.isRpmChangeToLarge(rightEscData);
         bool isRpmUpdateExceeded = leftEscData.isLastRpmUpdateExceeded() || rightEscData.isLastRpmUpdateExceeded();
 
-        if (isPotWithinBounds && !isRpmChangeToLarge && !isRpmUpdateExceeded)
+        if (isPotWithinBounds) // && !isRpmChangeToLarge && !isRpmUpdateExceeded
         {
             static auto cruiseInitializedTimestamp = millis();
             if (cruiseControl.isEnabled() && !cruiseControl.isInitialized())
@@ -245,12 +260,28 @@ void handleThrottle()
                 writePwm(pwmSignal);
             }
         }
-        else
-        {
-            if (isRpmChangeToLarge) bleSerial.println("RPM change exceeded limit");
-            if (isRpmUpdateExceeded) bleSerial.println("RPM update exceeded limit");
-            writePwm(ESC_MIN_PWM);
-        }
+        // else
+        // {
+            if (isRpmChangeToLarge) {
+                bleSerial.print("RPM limit: l: ");
+                bleSerial.print(leftEscData.avgRpm());
+                bleSerial.print(", r: ");
+                bleSerial.println(rightEscData.avgRpm());
+            }
+            if (isRpmUpdateExceeded) {
+                bleSerial.print("RPM update exceeded limit: l: ");
+                bleSerial.print(leftEscData.lastRpmUpdate);
+                bleSerial.print(", r: ");
+                bleSerial.println(rightEscData.lastRpmUpdate);    
+            }
+        //     writePwm(ESC_MIN_PWM);
+        // }
+        
+        // else {
+        //     if (isRpmChangeToLarge) bleSerial.println("RPM change exceeded limit");
+        //     if (isRpmUpdateExceeded) bleSerial.println("RPM update exceeded limit");
+        //     writePwm(ESC_MIN_PWM);
+        // }
     }
     else
     {
@@ -294,7 +325,8 @@ void handleTelemetry()
     uint16_t subjectId;
     decodeCyphalFrameId(canId, nodeId, subjectId);
 
-    auto &escData = canId == ESC_LEFT_CAN_ID ? leftEscData : rightEscData;
+    if (nodeId != ESC_LEFT_CAN_ID && nodeId != ESC_RIGHT_CAN_ID) return;
+    auto &escData = nodeId == ESC_LEFT_CAN_ID ? leftEscData : rightEscData;
 
     voltageBuffer.push(escData.busVoltage);
     escData.wattage = escData.busCurrent * escData.busVoltage;
@@ -303,7 +335,7 @@ void handleTelemetry()
     {
     case CURRENT_INFO_CAN_ID:
         decodeBufferCurrentInfo(buf, escData.electricalSpeed, escData.busCurrent, escData.operatingStatus);
-        escData.escRpmBuffer.push(escData.electricalSpeed);
+        escData.escRpmBuffer.push(escData.electricalSpeed * (60 / MOTOR_POLE_MAGNETS));
         escData.lastRpmUpdate = millis();
         break;
     case VOLTAGE_INFO_CAN_ID:
@@ -362,12 +394,15 @@ void handleBleData()
         return;
     }
 
-    auto &escData = leftEscData; //TODO: Felix send right esc data as well
-    bleData.volts = smoothedBatteryVoltage();
-    bleData.batteryPercentage = batteryPercentage(bleData.volts);
+    static EscData *lastEsc = nullptr;
+    auto &escData = lastEsc == &leftEscData ? rightEscData : leftEscData;
+    lastEsc = &escData;
+    
+    bleData.volts = escData.busVoltage;
+    bleData.batteryPercentage = batteryPercentage(smoothedBatteryVoltage());
     bleData.amps = escData.busCurrent;
     bleData.temperatureC = escData.mosTemp;
-    bleData.rpm = escData.rpm;
+    bleData.rpm = escData.avgRpm();
     bleData.kW = constrain(escData.wattage / 1000.0, 0, 50);
     bleData.usedKwh = escData.wattsHoursUsed / 1000; 
     bleData.power = mapd(max(pwmSignal, cruiseControl.calculateCruisePwm()), ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
