@@ -66,6 +66,9 @@ Thread bleLogThread = Thread();
 Thread otaThread = Thread();
 StaticThreadController<7> threads(&powerSwitchThread, &throttleThread, &telemetryThread, &trackPowerThread, &bleThread, &bleLogThread, &otaThread);
 
+unsigned long shutoffTestTimeTrigger = 10000; // to test shutoff
+unsigned long timeSinceArming = 0; // to test shutoff
+
 void setup()
 {
     Serial.begin(115200);
@@ -101,7 +104,8 @@ void setup()
     if (!BLE.begin())
     {
         bleSerial.println("Starting Bluetooth@ Low Energy module failed!");
-        while (1);
+        while (1)
+            ;
     }
     BLE.setLocalName("SP-140");
     BLE.setAdvertisedService(bleService);
@@ -159,7 +163,10 @@ void handlePowerSwitch()
     if (armed)
     {
         if (!isArmed)
+        {
             bleSerial.println("armed");
+            timeSinceArming = millis();
+        }
         isArmed = true;
     }
     else if (!isQuickToggled)
@@ -203,13 +210,18 @@ void handleThrottle()
         bleSerial.print("throttle: ");
         bleSerial.println(leftEscData.outputThrottle);
 
+        bleSerial.print("RPM: diff: ");
+        bleSerial.println(leftEscData.avgRpm() - rightEscData.avgRpm());
+
         static auto maxLastRpmUpdate = 0;
-        if (millis() - leftEscData.lastRpmUpdate > maxLastRpmUpdate) {
+        if (millis() - leftEscData.lastRpmUpdate > maxLastRpmUpdate)
+        {
             bleSerial.print("Max last update l: ");
             bleSerial.println(millis() - leftEscData.lastRpmUpdate);
             maxLastRpmUpdate = millis() - leftEscData.lastRpmUpdate;
         }
-        if (millis() - rightEscData.lastRpmUpdate > maxLastRpmUpdate) {
+        if (millis() - rightEscData.lastRpmUpdate > maxLastRpmUpdate)
+        {
             bleSerial.print("Max last update r: ");
             bleSerial.println(millis() - rightEscData.lastRpmUpdate);
             maxLastRpmUpdate = millis() - rightEscData.lastRpmUpdate;
@@ -235,7 +247,7 @@ void handleThrottle()
         bool isRpmChangeToLarge = leftEscData.isRpmChangeToLarge(rightEscData);
         bool isRpmUpdateExceeded = leftEscData.isLastRpmUpdateExceeded() || rightEscData.isLastRpmUpdateExceeded();
 
-        if (isPotWithinBounds) // && !isRpmChangeToLarge && !isRpmUpdateExceeded
+        if (isPotWithinBounds && !isRpmChangeToLarge && !isRpmUpdateExceeded)
         {
             static auto cruiseInitializedTimestamp = millis();
             if (cruiseControl.isEnabled() && !cruiseControl.isInitialized())
@@ -260,28 +272,11 @@ void handleThrottle()
                 writePwm(pwmSignal);
             }
         }
-        // else
-        // {
-            if (isRpmChangeToLarge) {
-                bleSerial.print("RPM limit: l: ");
-                bleSerial.print(leftEscData.avgRpm());
-                bleSerial.print(", r: ");
-                bleSerial.println(rightEscData.avgRpm());
-            }
-            if (isRpmUpdateExceeded) {
-                bleSerial.print("RPM update exceeded limit: l: ");
-                bleSerial.print(leftEscData.lastRpmUpdate);
-                bleSerial.print(", r: ");
-                bleSerial.println(rightEscData.lastRpmUpdate);    
-            }
-        //     writePwm(ESC_MIN_PWM);
-        // }
-        
-        // else {
-        //     if (isRpmChangeToLarge) bleSerial.println("RPM change exceeded limit");
-        //     if (isRpmUpdateExceeded) bleSerial.println("RPM update exceeded limit");
-        //     writePwm(ESC_MIN_PWM);
-        // }
+        else {
+            if (isRpmChangeToLarge) bleSerial.println("RPM change exceeded limit");
+            if (isRpmUpdateExceeded) bleSerial.println("RPM update exceeded limit");
+            writePwm(ESC_MIN_PWM);
+        }
     }
     else
     {
@@ -291,6 +286,10 @@ void handleThrottle()
                 bleSerial.println("cruise disabled");
             initialPotLvl = -1;
             cruiseControl.disable();
+        }
+        else if (isCutoffPercentageReached(bleData.volts))
+        {
+            bleSerial.println("Cut off voltage reached");
         }
         writePwm(ESC_DISARMED_PWM);
     }
@@ -397,14 +396,14 @@ void handleBleData()
     static EscData *lastEsc = nullptr;
     auto &escData = lastEsc == &leftEscData ? rightEscData : leftEscData;
     lastEsc = &escData;
-    
+
     bleData.volts = escData.busVoltage;
     bleData.batteryPercentage = batteryPercentage(smoothedBatteryVoltage());
     bleData.amps = escData.busCurrent;
     bleData.temperatureC = escData.mosTemp;
     bleData.rpm = escData.avgRpm();
     bleData.kW = constrain(escData.wattage / 1000.0, 0, 50);
-    bleData.usedKwh = escData.wattsHoursUsed / 1000; 
+    bleData.usedKwh = escData.wattsHoursUsed / 1000;
     bleData.power = mapd(max(pwmSignal, cruiseControl.calculateCruisePwm()), ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
 
     // write values
@@ -426,11 +425,11 @@ void handleBleData()
 /// region Helper functions
 
 void writePwm(int pwm) {
-  auto frameId = encodeCyphalFrameId(CAN_PRIO_HIGH, BROADCAST_NODE_ID, SEND_PWM_CAN_ID);
-  uint16_t throttleValue[] = {static_cast<uint16_t>(pwm), static_cast<uint16_t>(pwm), static_cast<uint16_t>(pwm), static_cast<uint16_t>(pwm)};
-  uint8_t encodedThrottle[8] = {0};
-  encodeThrottleValues(throttleValue, encodedThrottle);
-  CAN.sendMsgBuf(frameId, 1, 8, encodedThrottle);
+    auto frameId = encodeCyphalFrameId(CAN_PRIO_HIGH, BROADCAST_NODE_ID, SEND_PWM_CAN_ID);
+    uint16_t throttleValue[] = {static_cast<uint16_t>(pwm), static_cast<uint16_t>(pwm), static_cast<uint16_t>(0), static_cast<uint16_t>(0)};
+    uint8_t encodedThrottle[8] = {0};
+    encodeThrottleValues(throttleValue, encodedThrottle);
+    CAN.sendMsgBuf(frameId, 1, 8, encodedThrottle);
 }
 
 // throttle easing function based on threshold/performance mode

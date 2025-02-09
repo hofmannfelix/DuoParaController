@@ -4,26 +4,16 @@
 EscData::EscData() : escRpmBuffer() {}
 
 bool EscData::isRpmChangeToLarge(EscData &escData) {
-    int highestDiffIndex = -1;
-    int maxDiff = 0;
-
     if (escData.escRpmBuffer.capacity != escData.escRpmBuffer.size() || 
         escRpmBuffer.capacity != escRpmBuffer.size()) return false;
 
-    int avg = 0, escDataAvg = 0;
-    for (int i = 0; i < escRpmBuffer.size(); i++) {
-        avg += escRpmBuffer[i];
-        escDataAvg += escData.escRpmBuffer[i];
-    }
-    avg /= escRpmBuffer.size();
-    escDataAvg /= escData.escRpmBuffer.size();
-    auto diff = abs(avg - escDataAvg);
-    auto shutoffPercentage = SHUTOFF_RPM_DIFF_PERCENT * 0.01;
+    if (avgRpm() < MIN_RPM_FOR_DIFF_SHUTOFF && escData.avgRpm() < MIN_RPM_FOR_DIFF_SHUTOFF) return false;
 
-    if (avg < MIN_RPM_FOR_DIFF_SHUTOFF && escDataAvg < MIN_RPM_FOR_DIFF_SHUTOFF)
-        return false;
-    else
-        return diff > max(avg, escDataAvg) * shutoffPercentage;
+    if (abs(escData.escRpmBuffer.last() - escRpmBuffer.last()) > SHUTOFF_RPM_DIFF) {
+        if (escData.escRpmBuffer.first() - escRpmBuffer.last() > SHUTOFF_RPM_DIFF) return true;
+        if (escRpmBuffer.first() - escData.escRpmBuffer.last() > SHUTOFF_RPM_DIFF) return true;
+    }
+    return false;
 }
 
 int EscData::avgRpm() {
